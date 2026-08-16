@@ -100,36 +100,40 @@ async def _sender_loop():
     global _semaphore
     _semaphore = asyncio.Semaphore(WORKER_CONCURRENCY)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         while _running:
-            db  = await get_db()
-            now = now_iso()
+            try:
+                db  = await get_db()
+                now = now_iso()
 
-            async with db.execute(
-                """SELECT dj.id, dj.rule_id, dj.user_id, dj.username,
-                          dj.comment_id, dj.attempts, dj.dm_id, r.dm_message
-                   FROM dm_jobs dj
-                   JOIN rules r ON r.rule_id = dj.rule_id
-                   WHERE dj.status = 'queued'
-                     AND (dj.next_retry_at IS NULL OR dj.next_retry_at <= ?)
-                   ORDER BY dj.created_at ASC
-                   LIMIT 20""",
-                (now,),
-            ) as cur:
-                jobs = [dict(zip(
-                    ["id","rule_id","user_id","username","comment_id","attempts","dm_id","dm_message"],
-                    row
-                )) for row in await cur.fetchall()]
+                async with db.execute(
+                    """SELECT dj.id, dj.rule_id, dj.user_id, dj.username,
+                              dj.comment_id, dj.attempts, dj.dm_id, r.dm_message
+                       FROM dm_jobs dj
+                       JOIN rules r ON r.rule_id = dj.rule_id
+                       WHERE dj.status = 'queued'
+                         AND (dj.next_retry_at IS NULL OR dj.next_retry_at <= ?)
+                       ORDER BY dj.created_at ASC
+                       LIMIT 20""",
+                    (now,),
+                ) as cur:
+                    jobs = [dict(zip(
+                        ["id","rule_id","user_id","username","comment_id","attempts","dm_id","dm_message"],
+                        row
+                    )) for row in await cur.fetchall()]
 
-            if not jobs:
-                await asyncio.sleep(0.5)
-                continue
+                if not jobs:
+                    await asyncio.sleep(1.0)
+                    continue
 
-            async def guarded(job):
-                async with _semaphore:
-                    await _process_one_job(client, job)
+                async def guarded(job):
+                    async with _semaphore:
+                        await _process_one_job(client, job)
 
-            await asyncio.gather(*[guarded(j) for j in jobs], return_exceptions=True)
+                await asyncio.gather(*[guarded(j) for j in jobs], return_exceptions=True)
+            except Exception as e:
+                logger.error("FATAL ERROR IN SENDER LOOP: %s", e)
+                await asyncio.sleep(5)
 
 
 async def _reconciler_loop():
